@@ -1,0 +1,47 @@
+name: Feature request
+description: Suggest a change or an addition to MiragePlay.
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        MiragePlay is deliberately small: a menu bar receiver, no account, no
+        cloud relay. Proposals that keep it that way are the ones most likely to
+        land.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Describe the situation you are in and what makes it awkward today — the problem, not the fix.
+      placeholder: "When I mirror from an iPad in landscape, …"
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you would like MiragePlay to do. If it touches the menu bar panel, Preferences or the receiver core, say which.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Other ways the problem could be solved, including anything you tried — workarounds, other apps, doing nothing.
+      render: markdown
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true

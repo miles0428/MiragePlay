@@ -1,0 +1,97 @@
+name: Bug report
+description: Report a defect in MiragePlay — a crash, a wrong render, or a receiver that will not start.
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Please fill in every field below — the macOS
+        version, the chip and the app version are usually what narrows a bug
+        down fastest.
+
+  - type: input
+    id: macos-version
+    attributes:
+      label: macOS version
+      description: Apple menu → About This Mac. MiragePlay requires macOS 15.0 or later.
+      placeholder: "15.7.4"
+    validations:
+      required: true
+
+  - type: input
+    id: chip
+    attributes:
+      label: Chip
+      description: Apple menu → About This Mac (Apple silicon only — Intel Macs are not supported).
+      placeholder: "Apple M2 Pro"
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: MiragePlay version
+      description: Open the app's About window (menu bar icon → Preferences → About) and copy the version shown there.
+      placeholder: "1.0.0-rc.1"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact sequence that triggers the problem, starting from a clean launch.
+      placeholder: |
+        1. Launch MiragePlay
+        2. Mirror from an iPhone 15 on the same Wi-Fi
+        3. …
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: Expected and actual behaviour
+      description: What you expected to happen, and what happened instead.
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: ui-log
+    attributes:
+      label: ui.log
+      description: |
+        Paste the relevant lines from `ui.log`. The default location is
+        `$TMPDIR/com.ycchung.mirageplay/ui.log` (in Terminal:
+        `open "$TMPDIR/com.ycchung.mirageplay"`). The receiver core's own output
+        is a separate file, `launch.log`, in
+        `~/Library/Application Support/com.ycchung.mirageplay/` — include that
+        too if the problem is in the mirroring session rather than the UI.
+      render: text
+    validations:
+      required: false
+
+  - type: dropdown
+    id: homebrew
+    attributes:
+      label: How was MiragePlay installed?
+      options:
+        - Release archive (.tar.gz) dragged into /Applications
+        - Built from source
+        - Homebrew
+        - Other
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the existing issues and this is not a duplicate.
+          required: true
+        - label: This is not a security problem (those go to the maintainer privately, not to a public issue).
+          required: true

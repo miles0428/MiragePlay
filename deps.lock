@@ -1,0 +1,9 @@
+# pkg        | version constraint        | source                     | active leg            | Stage1 measured value
+cmake        | >=3.13          | brew                     | both legs               | 4.4.4
+openssl@3    | 3.*（openssl 3 series） | brew（r4 2.2-1 kept verbatim） | both legs（statically linked libcrypto） | 3.5.9
+libplist     | >=2.0           | brew（statically linked）             | both legs               | 2.8.0
+gstreamer    | version not pinned, source pinned  | brew（single formula）         | **only J2-② fallback leg** | 1.28.8
+rsvg-convert | any version             | brew（librsvg）           | build time（every appicon packaging） | 2.63.2
+Xcode CLT    | any installed version             | system                     | both legs               | macOS 26.4（CLT 26.6.0.0.1781586589; = branch minimum version data, pinned to 23）
+# Authoritative uxplay pin: core/vendor.lock. This table is a human-facing summary, not an input.
+uxplay pin  | branch mirageplay（fork of FDH2/UxPlay） | core/uxplay git     | D1' decision           | commit 4f5ad4bdeb345448871e2ab39f9793f35f499664 / tree da5c40ca2323f33d0368bd7f2857efdd9490c39d（90 files；base 87c12a7 = v1.73.6 21eef8df ⊕ NMR 7f23bd0）

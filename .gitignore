@@ -1,0 +1,95 @@
+# ===== A. macOS / external-disk environment noise (the repo lives on a working disk = a USB/external volume; not one safety rule may be dropped) =====
+.DS_Store
+._*
+.Spotlight-V100/
+.fseventsd
+.Trashes/
+.Trash-*
+.DocumentRevisions-V100/
+.TemporaryItems/
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.amelioration/
+.ameliorating*
+com.apple.*
+.AppleDouble
+.LSOverride
+.task_state/
+
+
+# ===== B. .hermes relay layer = the whole directory stays out of version control (one big-hammer rule) =====
+# YC ruling of 2026-10-10, translated: "anything inside .hermes stays out of version control" -- this supersedes the six-B whitelist negate structure approved by PM under r9.
+# contracts/, assets/ui-reference/, reports/, build-smoke/, scratch/ all physically exist inside the repo (on the working disk, travels with the disk, auditable) but are not tracked by git;
+# the File-as-Contract carrier is the repo directory entity (not the version chain). The former B.3 argument section is archived (see the six-B B.3 annotation).
+.hermes/
+
+# ===== C. UxPlay runtime artifacts (project-specific trap; keeps identity material and dumps from landing in cwd) =====
+*.pem
+*.key
+.uxplay.pem
+.uxplay.register
+.uxplay.dacp
+/audiodump*
+/videodump*
+*.h264
+*.aud
+*.alac
+*.mp4
+*.log
+
+# ===== D. Build artifacts (both J2 legs alike; source bodies DO enter git -- see group F, do not conflate) =====
+.build/
+.swiftpm/
+*.xcscmblueprint
+xcuserdata/
+DerivedData/
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+*.o
+*.a
+*.dylib
+*.so
+*.app/
+*.dSYM/
+*.linkmap
+# packaging/ = the default output root of scripts/build/package-release.sh: rebuildable build artifacts
+# (~192 MB, incl. the E8 final package), excluded per BLUEPRINT.md:503 group F "build artifacts do not
+# enter version control". The physical files stay on disk for sha256 re-verification.
+packaging/
+
+# scripts/build/ = a tracked SOURCE directory (group A6), not a build-artifact directory; re-included here
+# because the build/ rule above would otherwise shadow it (git: the later rule wins).
+!/scripts/build/
+
+# ===== D2. UxPlay upstream source tree (2026-10-19 decouple: now produced by scripts/build/vendor-uxplay.sh, out of version control) =====
+# core/uxplay/ used to be the vendored upstream source body (the GPL Corresponding Source). Since 2026-10-19 it is
+# materialized by scripts/build/vendor-uxplay.sh from the fork (pins in core/vendor.lock) into
+# _build/uxplay; this path keeps only a backward-compatible ignore rule, and any leftover files must never re-enter version control.
+/core/uxplay/
+
+# ===== E. Editor / shell miscellany =====
+*.swp
+*~
+.Idea/
+.vscode/
+
+# ===== F. Positive declaration (these paths are hit by none of the rules above = tracked by default; pinned here so a later ignore line cannot swallow them) =====
+# core/uxplay/**            upstream UxPlay source body (the GPL derivative work itself = the duty to convey Corresponding Source).
+#                           since 2026-10-19 obtained from the fork via scripts/build/vendor-uxplay.sh (see core/vendor.lock
+#                           repo/branch/commit/tree/manifest pins), materialized into _build/uxplay
+#                           (the whole _build tree is excluded by group G); this path is ignored by group D2 and no longer enters version control.
+#                           corresponding-source reproducibility = scripts/build/vendor-uxplay.sh + core/vendor.lock + manifest.
+# app/Package.resolved      SwiftPM resolution pin = the Swift-side ledger twin of deps.lock; it must enter the version chain
+# LICENSE / README.md / CONTRIBUTING.md / deps.lock / scripts/** / app/** / core/bridge/** / core/spawn/**
+
+# ===== G. Build output root =====
+# _build/ holds every generated artifact: the cmake cache and core build (<root>/core), the
+# materialized upstream source tree (<root>/uxplay), the SwiftPM cache (<root>/app.swiftpm), the
+# GStreamer closure cache (<root>/closure) and the assembled bundle (<root>/MiragePlay.app).
+# One root rule is required, not optional: group D's patterns only cover file types (*.o/*.a/
+# *.app/CMakeCache.txt), while `core/uxplay`, `app.swiftpm/<triple>/debug/MiragePlay`,
+# `app-build-meta.env` and the vendored *.c/*.cpp bodies carry no such extension. Without this
+# line they appear in `git status --porcelain` and build-app.sh --release refuses to ship.
+/_build/

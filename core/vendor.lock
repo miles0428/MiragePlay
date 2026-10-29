@@ -1,0 +1,22 @@
+# core/vendor.lock — pinned upstream source for the UxPlay core tree.
+# Plain key=value; safe to `source` or parse with grep/cut. No YAML, no parser.
+# Consumed by scripts/vendor-uxplay.sh. Do not hand-edit without re-running the
+# verification in that script (it fails closed on any mismatch).
+#
+# Provenance: fork of FDH2/UxPlay (source repo antimof/UxPlay); branch `mirageplay`
+# is based on the native-macos-renderer merge commit 87c12a7 in that history.
+
+VENDOR_NAME=uxplay
+VENDOR_REPO_URL=https://github.com/miles0428/UxPlay.git
+VENDOR_BRANCH=mirageplay
+VENDOR_COMMIT=4f5ad4bdeb345448871e2ab39f9793f35f499664
+VENDOR_TREE=da5c40ca2323f33d0368bd7f2857efdd9490c39d
+VENDOR_FILE_COUNT=90
+# VENDOR_MANIFEST is repo-root relative: the file is tracked under core/ so a
+# clean clone can verify the pin without the .task_state/ scratch directory
+# (vendor-uxplay.sh looks up $REPO_ROOT/$VENDOR_MANIFEST).
+VENDOR_MANIFEST=core/uxplay-branch-manifest_20261019.txt
+VENDOR_MANIFEST_SHA256=6117d6fcf7e77e264d7d765c325486b000ad87a076601bb0213821ae96480f13
+# Informational only — not used for verification.
+VENDOR_UPSTREAM_PARENT=FDH2/UxPlay
+VENDOR_BASE_COMMIT=87c12a70dede93b9bf038d9275818e44b459edcb
