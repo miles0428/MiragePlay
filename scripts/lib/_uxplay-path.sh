@@ -19,7 +19,11 @@
 #   uxplay_pinned_file_count       file count pinned in core/vendor.lock
 #   uxplay_default_build_root      default build CACHE root (what --build-dir names)
 #   uxplay_rebuild_stale_cache     drop a cmake build dir whose cache points at
-#                                  paths that no longer exist (pre-build gate)
+#                                  paths that no longer exist (pre-build gate;
+#                                  the deleting variant, for the script that
+#                                  reconfigures right after)
+#   uxplay_stale_cache_check       the same judgement WITHOUT deleting anything
+#                                  (for a caller that only consumes the build)
 #   uxplay_core_build_dir [root]   cmake build dir for the core: <root>/core
 #   uxplay_core_binary [root]      built core executable:        <root>/core/uxplay
 #
@@ -144,7 +148,7 @@ uxplay_default_build_root() {
 # error. Nothing in the cache format says which families a dependency added
 # tomorrow will use, so the values are read instead of the key names.
 #
-# One exemption, and it is a category rather than a key: CMAKE_INSTALL_* records
+# Exemption 1, and it is a category rather than a key: CMAKE_INSTALL_* records
 # *install destinations*, written by `cmake --install`, not by configure. A
 # healthy cache legitimately names paths that do not exist yet — measured on
 # this project's healthy cache, CMAKE_INSTALL_OLDINCLUDEDIR is /usr/include,
@@ -152,16 +156,46 @@ uxplay_default_build_root() {
 # absolute path values across 122 keys, 177 exist, and the single exception is
 # that install destination.
 #
+# Exemption 2 is per PATH, not per key, and it is the macOS framework alias
+# (2026-10-30). A framework bundle keeps its headers and imported libraries in
+# Headers/ and Libraries/; the .pc files of the "Official" GStreamer .pkg still
+# say include/ and lib/. The vendored UxPlay tree rewrites those two variables
+# at configure time (renderers/CMakeLists.txt:97-99 -> Headers, :117-118 ->
+# Libraries) but the rewrite never reaches CMakeCache.txt, so the cache keeps a
+# path that never existed on that machine, forever — GST122_CFLAGS is written by
+# the pkg_check_modules call inside that same `if`. Judging that path missing
+# dropped a build dir that had just been built successfully: on a machine whose
+# framework `.pc` files use the include/ and lib/ spelling (the "Official"
+# GStreamer .pkg does; a Homebrew-only machine never records the key at all)
+# the gate fired on every run and never converged.
+#
+# The exemption asks the FILESYSTEM, not the string, and it asks a NARROW
+# question: is this absent path the pkg-config spelling of a directory that
+# really exists inside an installed framework bundle? An absent path is spared
+# only when it is spelled <bundle>/include/... or <bundle>/lib/... (the two
+# alias spellings), the bundle itself exists, AND the directory the alias
+# stands for exists on disk. Everything else still reports missing: a dead
+# Homebrew Cellar path, a removed bundle, a `.framework`-looking name with
+# nothing behind it, and — importantly — a path that is really gone INSIDE an
+# installed bundle (a framework upgraded in place prunes subdirectories, and
+# that is genuine dependency drift, not a spelling). See
+# _uxplay_framework_alias_path.
+#
 # Fail-closed on a cache that cannot be understood: when the file exists but no
 # absolute path can be read out of it (unreadable, or a format this checker no
 # longer parses), the cache is treated as invalid instead of silently trusted.
 # A cache we cannot interpret is exactly the state that produces an
 # unexplainable link error, and a reconfigure costs seconds.
 #
-# One missing path invalidates the whole build dir: it is removed here and left
-# to the caller's `cmake -B` to recreate (a clean reconfigure). One marker line
-# is printed per removal so a test can assert the trigger instead of inferring
-# it from a slow build:
+# One missing path invalidates the whole build dir. Deleting it belongs to the
+# caller that immediately reconfigures (build-core.sh, via
+# uxplay_rebuild_stale_cache). A caller that only CONSUMES an already-built
+# tree must ask uxplay_stale_cache_check instead: it reports the same judgement
+# and removes nothing, because a consumer has no cmake invocation to recreate
+# what it would have deleted.
+#
+# One marker line is printed per removal so a test can assert the trigger
+# instead of inferring it from a slow build:
 #
 #     STALE-CACHE: <build dir> rebuilt (<key>=<missing path>)
 #
@@ -174,6 +208,183 @@ uxplay_default_build_root() {
 #   _UXPLAY_SCAN_MISSING    first "<key>=<path>" whose path is absent, else ""
 _UXPLAY_SCAN_ABS_COUNT=0
 _UXPLAY_SCAN_MISSING=""
+
+# True when an absent path is a macOS framework alias, not a moved dependency.
+#
+# A framework bundle is laid out as <Name>.framework/{Headers,Libraries}; the
+# .pc files shipped by the "Official" GStreamer .pkg still spell those as
+# include/ and lib/. The vendored UxPlay configure step rewrites the CMake
+# variables (renderers/CMakeLists.txt:97-99 -> Headers, :117-118 ->
+# Libraries) and therefore the compile lines, but CMakeCache.txt keeps the
+# pkg-config spelling verbatim, so the cache keeps a path that never existed
+# on that machine, forever. Judging that path missing dropped a build dir that
+# had just been built successfully: on a machine whose framework `.pc` files
+# use the include/ and lib/ spelling (the "Official" GStreamer .pkg does; a
+# Homebrew-only machine never records the key at all) the gate fired on every
+# run and never converged.
+#
+# The check asks the filesystem, which is the whole point: the string
+# `.framework` alone proves nothing (a Cellar path may contain it, and a bundle
+# can be uninstalled). But "the bundle exists" is NOT enough either: a path
+# that is really gone INSIDE an installed bundle (a framework upgraded in
+# place prunes subdirectories) is genuine dependency drift, and the gate exists
+# to catch exactly that. The exemption is therefore granted ONLY for the two
+# alias spellings, and ONLY when the directory the alias stands for is really
+# there:
+#
+#   <bundle>/include[/<rest>]  <->  <bundle>/Headers[/<rest>]
+#   <bundle>/lib[/<rest>]      <->  <bundle>/Libraries[/<rest>]
+#
+# "include" and "lib" must be the component IMMEDIATELY below the bundle: that
+# is the spelling pkg-config produces (evidence: the upstream rewrite matches
+# on the two prefixes /Library/FrameWorks/GStreamer.framework/include and
+# /Library/FrameWorks/GStreamer.framework/lib, renderers/CMakeLists.txt:97 and
+# :117, and the failing machine's configure log prints both of them). A real
+# bundle has no include/ or lib/ directory at all, so nothing below those two
+# names can ever be a real path — every such path is a spelling, and the
+# question is only whether the thing it spells exists. A path that points
+# anywhere else inside the bundle (Headers/..., Libraries/..., Versions/...) is
+# a REAL path and is reported missing when it is gone.
+#
+# Two spellings of the same alias root exist, and both are honoured:
+#
+#   1. the literal counterpart  <bundle>/Headers/<rest>  (or Libraries/<rest>)
+#   2. the counterpart with the pkg-config MODULE directory dropped:
+#      <bundle>/Headers/<rest without "<module>-<version>">
+#
+# Candidate 2 exists because pkg-config spells an include root as
+# `includedir=${prefix}/include/gstreamer-1.0` with `Cflags: -I${includedir}`
+# — the module directory is part of the ALIAS SPELLING, while the framework
+# stores the headers FLAT under Headers/ (upstream compiles with
+# -I<bundle>/Headers and `#include <gst/gst.h>`, and its renderers.c did
+# compile on the failing machine, so <bundle>/Headers/gst/gst.h is the file
+# that really exists — there is no Headers/gstreamer-1.0/).
+#
+# To keep candidate 2 from becoming a blanket amnesty, the module directory
+# is only dropped when the bundle ITSELF ships that module: the bundle's own
+# pkg-config directory must contain <module>.pc. That directory is where the
+# upstream build looks for the framework's .pc files
+# (renderers/CMakeLists.txt:9 and :18 set PKG_CONFIG_PATH to
+# <bundle>/Libraries/pkgconfig), and it is also how the failing machine found
+# the framework's gstreamer-1.0.pc in the first place. A module the bundle
+# does not ship (glib-2.0, say) is NOT dropped, so its alias path is judged
+# against the literal counterpart and reported missing when that is gone.
+#
+# The two forms with no tail at all — <bundle>/include and <bundle>/lib —
+# stand for the whole Headers/ (resp. Libraries/) tree. The judgement is the
+# same one the tail cases use: the counterpart root must exist. That is the
+# explicit, consistent decision for those two forms.
+#
+# Args:
+#     path (string): absolute path that already failed `[ -e ]`.
+#
+# Returns:
+#     int: 0 when the path is a framework alias whose counterpart exists
+#          (spare it); 1 otherwise (report it as missing).
+_uxplay_framework_alias_path() {
+    local path="$1"
+    # Cheap pre-filter: a framework component must end at a '/' boundary (or be
+    # the last component), so a name like `foo.frameworkish` never qualifies.
+    case "$path" in
+        *.framework|*.framework/*) ;;
+        *) return 1 ;;
+    esac
+    local _parts=()
+    local part="" prefix="" bundle=""
+    IFS='/' read -r -a _parts <<<"$path"
+    for part in ${_parts[@]+"${_parts[@]}"}; do
+        [ -n "$part" ] || continue
+        prefix="$prefix/$part"
+        case "$part" in
+            *.framework) bundle="$prefix" ;;
+        esac
+    done
+    [ -n "$bundle" ] || return 1
+    # The bundle itself must exist; a dangling alias into a removed framework
+    # is exactly the dependency drift this gate is for.
+    [ -d "$bundle" ] || return 1
+
+    # The alias component must sit IMMEDIATELY below the bundle.
+    local remainder="" alias="" rest=""
+    remainder="${path#"$bundle"/}"
+    case "$remainder" in
+        include)   alias="include"; rest="" ;;
+        include/*) alias="include"; rest="${remainder#include/}" ;;
+        lib)       alias="lib";     rest="" ;;
+        lib/*)     alias="lib";     rest="${remainder#lib/}" ;;
+        *) return 1 ;;
+    esac
+
+    local root=""
+    case "$alias" in
+        include) root="$bundle/Headers" ;;
+        lib)     root="$bundle/Libraries" ;;
+    esac
+    # The counterpart root must exist: a bundle without Headers/ (or without
+    # Libraries/) is not a working dependency.
+    [ -d "$root" ] || return 1
+
+    # No tail: the alias stands for the whole tree. The counterpart root exists
+    # (checked above), so the alias is spared.
+    [ -n "$rest" ] || return 0
+
+    # Candidate 1: the literal counterpart.
+    [ -e "$root/$rest" ] && return 0
+
+    # Candidate 2 applies to the INCLUDE spelling only. pkg-config writes
+    # `includedir=${prefix}/include/gstreamer-1.0` (the module directory is
+    # part of the include root) but `libdir=${prefix}/lib` (it is not), so a
+    # module directory under lib/ is a real directory — the plugin directory —
+    # and its absence is drift, not a spelling.
+    [ "$alias" = "include" ] || return 1
+
+    # Candidate 2: the counterpart with the pkg-config module directory
+    # ("<name>-<version>", e.g. gstreamer-1.0) dropped — but only for a module
+    # the bundle itself ships.
+    local first="" tail=""
+    first="${rest%%/*}"
+    if [ "$first" != "$rest" ]; then
+        tail="${rest#*/}"
+    fi
+    if _uxplay_framework_ships_module "$bundle" "$first"; then
+        if [ -n "$tail" ]; then
+            [ -e "$root/$tail" ] && return 0
+        else
+            # The alias names the include root itself; its counterpart is the
+            # whole tree, which exists.
+            return 0
+        fi
+    fi
+
+    # Neither counterpart exists: the dependency is really gone.
+    return 1
+}
+
+# True when the framework bundle ships the pkg-config module <module>.
+#
+# A framework bundle carries its own pkg-config directory (the upstream build
+# points PKG_CONFIG_PATH at <bundle>/Libraries/pkgconfig,
+# renderers/CMakeLists.txt:9 and :18). The <module>.pc file inside it is the
+# bundle's own statement that it provides that module — which is what makes
+# the module directory in a pkg-config include path an ALIAS SPELLING rather
+# than a real directory. A module the bundle does not ship is not covered.
+#
+# Args:
+#     bundle (string): the framework bundle directory.
+#     module (string): the pkg-config module name, e.g. "gstreamer-1.0".
+#
+# Returns:
+#     int: 0 when the bundle ships that module, 1 otherwise.
+_uxplay_framework_ships_module() {
+    local bundle="$1" module="$2" dir=""
+    [ -n "$bundle" ] && [ -n "$module" ] || return 1
+    for dir in "$bundle/Libraries/pkgconfig" "$bundle/lib/pkgconfig" \
+               "$bundle/pkgconfig" "$bundle"/Versions/*/lib/pkgconfig; do
+        [ -d "$dir" ] || continue
+        [ -f "$dir/$module.pc" ] && return 0
+    done
+    return 1
+}
 
 # Scan the absolute paths of one CMakeCache value.
 #
@@ -216,18 +427,33 @@ _uxplay_cache_scan_value() {
             esac
             _UXPLAY_SCAN_ABS_COUNT=$((_UXPLAY_SCAN_ABS_COUNT + 1))
             if [ ! -e "$path" ]; then
-                _UXPLAY_SCAN_MISSING="$key=$path"
-                return 0
+                # Exemption 2 (header): absent, but inside a framework bundle
+                # that is still installed — the cache holds the pkg-config
+                # spelling, not a path that ever existed.
+                if ! _uxplay_framework_alias_path "$path"; then
+                    _UXPLAY_SCAN_MISSING="$key=$path"
+                    return 0
+                fi
             fi
         done
     done
     return 0
 }
 
-uxplay_rebuild_stale_cache() {
+# Stale judgement only, no side effects: prints "<key>=<path>" (or the
+# fail-closed note) when the build dir must be rebuilt, nothing when it is
+# valid. Shared by the deleting and the read-only entry points so there is one
+# definition of "this cache is still valid".
+#
+# Args:
+#     build_dir (string): cmake build dir holding CMakeCache.txt.
+#     expected_src (string): pinned source dir, or "" to skip that check.
+#
+# Returns:
+#     int: always 0; the verdict is the printed line.
+_uxplay_stale_cache_reason() {
     local build_dir="${1:-}"
     local expected_src="${2:-}"
-    UXPLAY_STALE_CACHE_REMOVED=0
     [ -n "$build_dir" ] || return 0
     local cache="$build_dir/CMakeCache.txt"
     [ -f "$cache" ] || return 0
@@ -252,8 +478,8 @@ uxplay_rebuild_stale_cache() {
             esac
             key="${line%%:*}"
             value="${line#*=}"
-            # The one exemption (see the header): an install destination is
-            # created by `cmake --install`, so configure may leave it absent.
+            # Exemptions, see the header: an install destination is created by
+            # `cmake --install`, so configure may leave it absent.
             case "$key" in
                 CMAKE_INSTALL_*) continue ;;
             esac
@@ -274,9 +500,59 @@ uxplay_rebuild_stale_cache() {
     fi
 
     [ -n "$reason" ] || return 0
+    printf '%s\n' "$reason"
+    return 0
+}
+
+# Drop a build dir whose cache points at paths that no longer exist.
+#
+# For the caller that immediately reconfigures: the directory is removed and
+# left to its own `cmake -B` to recreate. Only build-core.sh belongs here —
+# it owns the cmake invocation that refills what this deletes.
+#
+# Args:
+#     build_dir (string): cmake build dir to validate (and drop when stale).
+#     expected_src (string): pinned source dir, or "" to skip that check.
+#
+# Returns:
+#     int: always 0. Sets UXPLAY_STALE_CACHE_REMOVED to 1 when it deleted.
+uxplay_rebuild_stale_cache() {
+    local build_dir="${1:-}"
+    local reason=""
+    UXPLAY_STALE_CACHE_REMOVED=0
+    [ -n "$build_dir" ] || return 0
+    reason="$(_uxplay_stale_cache_reason "$build_dir" "${2:-}")"
+    [ -n "$reason" ] || return 0
     rm -rf "$build_dir"
     UXPLAY_STALE_CACHE_REMOVED=1
     printf 'STALE-CACHE: %s rebuilt (%s)\n' "$build_dir" "$reason"
+    return 0
+}
+
+# Same judgement, nothing removed. For a caller that only consumes an
+# already-built tree (build-app.sh: it never configures cmake).
+#
+# Why the split exists: a consumer that deletes on the way in destroys the
+# artifact it is about to package, and cannot put it back — it has no cmake
+# step. That produced a loop where the run after the deletion reported "core
+# uxplay binary missing" instead of the real cause. Detection stays shared;
+# deletion stays with the builder.
+#
+# Args:
+#     build_dir (string): cmake build dir to validate.
+#     expected_src (string): pinned source dir, or "" to skip that check.
+#
+# Returns:
+#     int: always 0. Sets UXPLAY_STALE_CACHE_STALE (0/1) and
+#          UXPLAY_STALE_CACHE_REASON ("<key>=<path>", empty when valid).
+uxplay_stale_cache_check() {
+    UXPLAY_STALE_CACHE_STALE=0
+    UXPLAY_STALE_CACHE_REASON=""
+    local reason=""
+    reason="$(_uxplay_stale_cache_reason "${1:-}" "${2:-}")"
+    [ -n "$reason" ] || return 0
+    UXPLAY_STALE_CACHE_STALE=1
+    UXPLAY_STALE_CACHE_REASON="$reason"
     return 0
 }
 

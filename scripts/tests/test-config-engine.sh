@@ -217,11 +217,14 @@ fi
 echo "PASS: core build-dir is one definition shared by build-core.sh/build-app.sh (D-1)"
 
 # --- stale-cache gate guard (R1/N4, 2026-10-28) ------------------------------
-# `uxplay_rebuild_stale_cache` is the pre-build gate both build scripts call: a
-# CMakeCache.txt that names paths which no longer exist is dropped so cmake
+# The shared stale-cache judgement is the pre-build gate both build scripts use:
+# a CMakeCache.txt that names paths which no longer exist is dropped so cmake
 # reconfigures instead of failing later with 'plist/plist.h' file not found.
+# Since 2026-10-30 that judgement has two entry points — the deleting one
+# (build-core.sh) and the read-only one (build-app.sh) — and the cases below
+# exercise the deleting entry point, which is where the rule lives.
 # Nothing asserted this gate before, so a rule that stopped matching would go
-# unnoticed until a build failed far from the cause. The four properties below
+# unnoticed until a build failed far from the cause. The properties below
 # are what make the gate worth its code, and each one can turn red on its own:
 #   1. a HEALTHY cache produces no marker — zero false positives, which is why
 #      the CMAKE_INSTALL_* exemption exists (an install destination such as
@@ -233,6 +236,13 @@ echo "PASS: core build-dir is one definition shared by build-core.sh/build-app.s
 #      cmake went on to link against a Cellar path that was gone
 #   4. a cache whose absolute paths cannot be read is treated as stale
 #      (fail closed) instead of trusted
+#   5. an absent path that is a macOS framework alias (GStreamer.framework's
+#      include/ and lib/, which the .pc files name and the vendored tree
+#      rewrites to Headers/ and Libraries/ at configure time) is spared while
+#      the bundle is installed — otherwise the gate never converges on a
+#      machine that has one
+#   6. build-app.sh, which only consumes an already-built core, asks the
+#      read-only checker and never the deleting one
 # Each case runs the real function against a cache copy under TEST_TMP — the
 # function removes the directory it rejects, so it must never see a real build
 # dir. A case asserts the marker line AND the output variable; "there was some
@@ -338,15 +348,198 @@ else
     echo "      stale-cache real-checkout-cache   SKIP (no $REAL_CACHE)"
 fi
 
+# --- 6-8: the macOS framework alias (2026-10-30) -----------------------------
+# A framework bundle stores Headers/ and Libraries/; the .pc files of the
+# "Official" GStreamer .pkg say include/ and lib/. The vendored UxPlay tree
+# rewrites the CMake variables at configure time
+# (_build/uxplay/renderers/CMakeLists.txt:97-99 and :117-118) but never the
+# cache, so CMakeCache.txt permanently records GST122_CFLAGS with a path that
+# never existed on that machine. The gate used to call that stale and delete a
+# build dir that had just built successfully — on any machine whose framework
+# .pc files use that spelling, every run, forever.
+#
+# The exemption is NARROW on purpose: it covers only the two alias spellings
+# (<bundle>/include/... and <bundle>/lib/...), and only when the directory the
+# alias stands for is really there. The cases must pull in opposite directions
+# or the fix is worthless:
+#   6. the bundle exists and ships the module -> the alias path is spared,
+#      nothing is deleted
+#   6b. the bundle exists but a REAL path inside it is gone -> still stale.
+#      This is the reviewer's counterexample: a framework upgraded in place
+#      prunes subdirectories, that is genuine dependency drift, and a gate that
+#      spares everything under a .framework is a gate with a hole in it
+#   7. the bundle exists but the SAME cache also names a dead Cellar path ->
+#      still stale (the exemption is per path, not a blanket "this cache is
+#      fine because it mentions a framework")
+#   8. the bundle is GONE -> still stale (the exemption asks the filesystem; a
+#      path string containing .framework is not evidence of anything)
+stale_append_key() {
+    # stale_append_key <dir> <key> <value>: add a line the healthy fixture has
+    # no slot for (the framework fields only exist on machines with a bundle).
+    printf '%s:INTERNAL=%s\n' "$2" "$3" >>"$1/CMakeCache.txt" || return 1
+    # -- : the value may itself start with '-' (-I<dir> is a value).
+    grep -Fq -- "$3" "$1/CMakeCache.txt" || return 1
+}
+
+FRAMEWORK_ROOT="$STALE_ROOT/fw"
+FRAMEWORK_BUNDLE="$FRAMEWORK_ROOT/GStreamer.framework"
+FRAMEWORK_INCLUDE="$FRAMEWORK_BUNDLE/include/gstreamer-1.0"
+FRAMEWORK_LIB="$FRAMEWORK_BUNDLE/lib"
+# The layout a real bundle has: Headers/ holds the headers FLAT (gst/gst.h
+# directly, which is what -I<bundle>/Headers + '#include <gst/gst.h>' needs),
+# Libraries/ holds the dylibs, and Libraries/pkgconfig/ holds the bundle's own
+# .pc files (renderers/CMakeLists.txt:9 and :18 point PKG_CONFIG_PATH there).
+mkdir -p "$FRAMEWORK_BUNDLE/Headers/gst" "$FRAMEWORK_BUNDLE/Libraries/pkgconfig" \
+    || STALE_FAIL="$STALE_FAIL framework(fixture-not-created)"
+: >"$FRAMEWORK_BUNDLE/Headers/gst/gst.h" \
+    || STALE_FAIL="$STALE_FAIL framework(fixture-no-header)"
+: >"$FRAMEWORK_BUNDLE/Libraries/libgstreamer-1.0.0.dylib" \
+    || STALE_FAIL="$STALE_FAIL framework(fixture-no-dylib)"
+: >"$FRAMEWORK_BUNDLE/Libraries/pkgconfig/gstreamer-1.0.pc" \
+    || STALE_FAIL="$STALE_FAIL framework(fixture-no-pc)"
+# The layout the gate must NOT accept: both alias spellings are absent.
+[ ! -e "$FRAMEWORK_INCLUDE" ] && [ ! -e "$FRAMEWORK_LIB" ] \
+    || STALE_FAIL="$STALE_FAIL framework(alias-paths-exist-unexpectedly)"
+
+# stale_write_framework_cache <dir>: healthy cache plus the two framework
+# spellings pkg-config reports, exactly as the reported failure had them.
+stale_write_framework_cache() {
+    stale_write_cache "$1" || return 1
+    stale_append_key "$1" GST122_CFLAGS "-I$FRAMEWORK_INCLUDE" || return 1
+    stale_append_key "$1" GST122_LDFLAGS "-L$FRAMEWORK_LIB;-framework;GStreamer" || return 1
+}
+
+# 6. bundle present and shipping the module -> spared (the false positive that
+#    caused the loop)
+stale_write_framework_cache "$STALE_ROOT/framework-alias" \
+    || STALE_FAIL="$STALE_FAIL framework-alias(no-cache)"
+stale_expect framework-alias "$STALE_ROOT/framework-alias" no
+
+# 6b. bundle present, but a REAL path inside it is gone -> still stale. The
+#     alias exemption must not cover Headers/... / Libraries/... paths: those
+#     are real paths, and their absence is the dependency drift the gate is
+#     for. (Reviewer counterexample (a).)
+stale_write_framework_cache "$STALE_ROOT/framework-drift" \
+    || STALE_FAIL="$STALE_FAIL framework-drift(no-cache)"
+stale_append_key "$STALE_ROOT/framework-drift" GST122_INCLUDE_DIRS \
+    "$FRAMEWORK_BUNDLE/Headers/gst/gst-missing.h" \
+    || STALE_FAIL="$STALE_FAIL framework-drift(pollution-not-applied)"
+stale_expect framework-drift "$STALE_ROOT/framework-drift" yes
+
+# 7. bundle present, dead Cellar path in the same cache -> still stale
+stale_write_framework_cache "$STALE_ROOT/framework-plus-dead" \
+    || STALE_FAIL="$STALE_FAIL framework-plus-dead(no-cache)"
+# appended, not pollute(): the healthy fixture has no GST124_CFLAGS slot, and
+# sed on a key that is absent would silently add nothing (a case that passes
+# because it never ran).
+stale_append_key "$STALE_ROOT/framework-plus-dead" GST124_CFLAGS \
+    "-I$STALE_DEAD/include/gstreamer-1.0" \
+    || STALE_FAIL="$STALE_FAIL framework-plus-dead(pollution-not-applied)"
+stale_expect framework-plus-dead "$STALE_ROOT/framework-plus-dead" yes
+
+# 8. bundle removed -> the same cache is stale again (negative control: the
+#    exemption must not be a string test, so taking the bundle away re-arms it)
+rm -rf "$FRAMEWORK_ROOT"
+stale_write_framework_cache "$STALE_ROOT/framework-gone" \
+    || STALE_FAIL="$STALE_FAIL framework-gone(no-cache)"
+[ ! -d "$FRAMEWORK_BUNDLE" ] || STALE_FAIL="$STALE_FAIL framework-gone(fixture-still-present)"
+stale_expect framework-gone "$STALE_ROOT/framework-gone" yes
+
+# --- 9: the consumer must not be the deleter (2026-10-30) --------------------
+# build-app.sh only consumes <build-dir>/core/uxplay and never configures cmake.
+# When it called the deleting gate it removed the core it was about to package,
+# then reported "core uxplay binary missing" on the following run.
+#
+# Two independent guards, because a static one alone was not enough:
+#
+#   9a. content assertion on build-app.sh — not a literal call match. The
+#       deleting function must not be NAMED anywhere in the file (a call on its
+#       own line, an inlined `if uxplay_rebuild_stale_cache ...; then`, an
+#       indirect `DEL=uxplay_rebuild_stale_cache; $DEL` all contain the name),
+#       and no `rm -rf` may target the core build dir. The read-only entry must
+#       still be called. Comment lines are excluded from the "is called"
+#       positive check only, so the explanatory comment above the call does not
+#       have to be rewritten every time the prose changes.
+#   9b. runtime assertion — the read-only entry point against a genuinely stale
+#       cache must report stale AND leave the build dir (and its
+#       CMakeCache.txt) exactly where it was, printing no removal marker. This
+#       is the invariant the whole split exists for, and no static check can
+#       see it: moving `rm -rf` into the SHARED _uxplay_stale_cache_reason
+#       keeps build-app.sh's text identical while restoring the original defect.
+APP_SH="$ROOT/scripts/build/build-app.sh"
+APP_READONLY="$(grep -Ec '^[[:space:]]*[^#[:space:]]*uxplay_stale_cache_check[[:space:]]' "$APP_SH")"
+# The deleting function's NAME must not appear at all, in code or comment.
+APP_DELETER="$(grep -Fc 'uxplay_rebuild_stale_cache' "$APP_SH")"
+# No rm -rf may name the core build dir (directly or via the resolver).
+APP_RM_CORE="$(grep -E '^[[:space:]]*[^#[:space:]]*rm[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*f.*(uxplay_core_build_dir|CORE_UXPLAY|BUILD_DIR/core)' "$APP_SH" | wc -l | tr -d ' ')"
+[ "${APP_READONLY:-0}" -ge 1 ] || STALE_FAIL="$STALE_FAIL build-app(read-only-gate-missing)"
+[ "${APP_DELETER:-0}" -eq 0 ] || STALE_FAIL="$STALE_FAIL build-app(deleting-gate-named)"
+[ "${APP_RM_CORE:-0}" -eq 0 ] || STALE_FAIL="$STALE_FAIL build-app(rm-rf-on-core)"
+printf '      stale-cache %-22s read-only-call=%s deleting-mentions=%s rm-core=%s\n' \
+    build-app-consumer "${APP_READONLY:-0}" "${APP_DELETER:-0}" "${APP_RM_CORE:-0}"
+
+# 9b. runtime: the read-only entry point must not delete anything.
+#     stale_readonly_run <dir> -> "<stale>|<reason>|<marker>|<cache present>|<dir present>"
+stale_readonly_run() {
+    bash -c '
+        . "$1/scripts/lib/_uxplay-path.sh" || exit 9
+        uxplay_stale_cache_check "$2" ""
+        marker=0
+        if printf "%s\n" "$UXPLAY_STALE_CACHE_REASON" | grep -Eq "^STALE-CACHE: "; then
+            marker=1
+        fi
+        cache=no
+        [ -f "$2/CMakeCache.txt" ] && cache=yes
+        dir=no
+        [ -d "$2" ] && dir=yes
+        printf "%s|%s|%s|%s|%s\n" \
+            "${UXPLAY_STALE_CACHE_STALE:-unset}" \
+            "${UXPLAY_STALE_CACHE_REASON:-}" \
+            "$marker" "$cache" "$dir"
+    ' _ "$ROOT" "$1" 2>&1
+}
+
+READONLY_DIR="$STALE_ROOT/readonly-entry"
+stale_write_cache "$READONLY_DIR" || STALE_FAIL="$STALE_FAIL readonly-entry(no-cache)"
+stale_pollute "$READONLY_DIR" OPENSSL_PREFIX "$STALE_DEAD" \
+    || STALE_FAIL="$STALE_FAIL readonly-entry(pollution-not-applied)"
+# A sentinel that stands in for the built core the consumer is about to package.
+printf 'not-a-real-binary\n' >"$READONLY_DIR/uxplay"
+RO_OUT="$(stale_readonly_run "$READONLY_DIR")"
+RO_STALE="${RO_OUT%%|*}"
+RO_REST="${RO_OUT#*|}"
+RO_REASON="${RO_REST%%|*}"
+RO_REST="${RO_REST#*|}"
+RO_MARKER="${RO_REST%%|*}"
+RO_REST="${RO_REST#*|}"
+RO_CACHE="${RO_REST%%|*}"
+RO_DIR="${RO_REST#*|}"
+[ "$RO_STALE" = "1" ] || STALE_FAIL="$STALE_FAIL readonly-entry(not-stale=$RO_STALE)"
+[ -n "$RO_REASON" ] || STALE_FAIL="$STALE_FAIL readonly-entry(empty-reason)"
+[ "$RO_CACHE" = "yes" ] || STALE_FAIL="$STALE_FAIL readonly-entry(cache-deleted)"
+[ "$RO_DIR" = "yes" ] || STALE_FAIL="$STALE_FAIL readonly-entry(dir-deleted)"
+[ -f "$READONLY_DIR/uxplay" ] || STALE_FAIL="$STALE_FAIL readonly-entry(core-binary-deleted)"
+# No removal marker may be produced by the read-only path. The marker is
+# written by the DELETING entry point only (printf 'STALE-CACHE: ...'), so its
+# presence anywhere in the read-only output means deletion leaked in.
+if printf '%s\n' "$RO_OUT" | grep -Eq 'STALE-CACHE: '; then
+    STALE_FAIL="$STALE_FAIL readonly-entry(removal-marker-printed)"
+fi
+printf '      stale-cache %-22s stale=%s cache-kept=%s dir-kept=%s marker=%s\n' \
+    readonly-entry "$RO_STALE" "$RO_CACHE" "$RO_DIR" "$RO_MARKER"
+
 if [ -n "$STALE_FAIL" ]; then
     echo "FAIL: the pre-build stale-cache gate is not doing its job:" >&2
     printf '      %s\n' $STALE_FAIL >&2
     echo "      a stale cache must be dropped before cmake links against a path that" >&2
-    echo "      is gone; a healthy cache must never be dropped (see" >&2
-    echo "      uxplay_rebuild_stale_cache in scripts/lib/_uxplay-path.sh)." >&2
+    echo "      is gone; a healthy cache must never be dropped; an absent path inside" >&2
+    echo "      an installed .framework bundle is spared only for the include/ and lib/" >&2
+    echo "      alias spellings whose counterpart directory exists; and the read-only" >&2
+    echo "      entry point (uxplay_stale_cache_check) must never delete anything —" >&2
+    echo "      see _uxplay_framework_alias_path in scripts/lib/_uxplay-path.sh." >&2
     exit 1
 fi
-echo "PASS: stale-cache gate fires on dead paths (OpenSSL and libplist/gstreamer) and spares a healthy cache"
+echo "PASS: stale-cache gate fires on dead paths (OpenSSL and libplist/gstreamer), spares a healthy cache, spares framework aliases only when the aliased directory exists, reports drift inside an installed bundle, and leaves deletion to the builder while the read-only entry point removes nothing"
 
 
 APP="$ROOT/app"

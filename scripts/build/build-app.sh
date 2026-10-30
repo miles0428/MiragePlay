@@ -209,18 +209,29 @@ if ! uxplay_require_pinned_tree; then
     exit 1
 fi
 
-# Pre-build cache validity gate (the same checker build-core.sh calls). This
+# Pre-build cache validity gate — READ-ONLY, deliberately (2026-10-30). This
 # script consumes <build-dir>/core/uxplay and never configures cmake itself, so
-# a core build dir whose cache points at paths that no longer exist can only be
-# repaired by a reconfigure. The stale dir is dropped here — before anything is
-# compiled or copied — and the run stops with the command that rebuilds it:
-# which renderer mode to use (--embedded / --spawn) is the caller's decision,
-# so this script does not guess one on their behalf.
-uxplay_rebuild_stale_cache "$(uxplay_core_build_dir "$BUILD_DIR")" "$(uxplay_src_dir || true)"
-if [ "${UXPLAY_STALE_CACHE_REMOVED:-0}" = "1" ]; then
-    echo "ERROR: the core build cache under $BUILD_DIR/core was stale and has been removed." >&2
-    echo "       Rebuild the core before assembling: scripts/build/build-core.sh --embedded" >&2
-    echo "       (or --spawn, matching the renderer the bundle is meant to ship)." >&2
+# it cannot rebuild what it rejects: calling the deleting variant here removed
+# the tree it was about to package, before anything was compiled or copied, and
+# then reported the removal as the error. The next run found no cache at all,
+# packaged, and died at the binary check below with "core uxplay binary
+# missing" — one stale verdict propagated into a loop with no exit.
+#
+# Detection is shared with build-core.sh (one definition of "this cache is
+# still valid"); deletion belongs to build-core.sh, because it owns the
+# `cmake -B` that refills the directory. Here the gate only names the stale
+# key=path and hands over the exact command that repairs it, with the build dir
+# spelled out. Which renderer mode (--embedded / --spawn) is the caller's
+# decision, so this script does not guess one on their behalf.
+uxplay_stale_cache_check "$(uxplay_core_build_dir "$BUILD_DIR")" "$(uxplay_src_dir || true)"
+if [ "${UXPLAY_STALE_CACHE_STALE:-0}" = "1" ]; then
+    echo "ERROR: the core build cache under $BUILD_DIR/core is stale: ${UXPLAY_STALE_CACHE_REASON}" >&2
+    echo "       it names a path that no longer exists, so linking it would fail far" >&2
+    echo "       from the cause. NOTHING was removed by this script — the built core is" >&2
+    echo "       still there and is only rebuilt by the script that owns the cmake dir." >&2
+    echo "       run: $REPO_ROOT/scripts/build/build-core.sh --embedded --build-dir $(printf '%q' "$BUILD_DIR")" >&2
+    echo "       (or --spawn instead of --embedded, matching the renderer the bundle is" >&2
+    echo "        meant to ship)." >&2
     exit 1
 fi
 

@@ -9,6 +9,59 @@ Two audiences use this page:
 - **Releasers** producing the `.zip` that gets published: one command,
   `scripts/build/release.sh`, under [Release archive](#release-archive).
 
+## Prerequisites
+
+The toolchain, before any of the commands below:
+
+- **Xcode Command Line Tools** — `xcode-select --install`. This provides
+  `swift`, `clang`, `codesign`, `iconutil` and the SDK that supplies the C++
+  standard headers. Homebrew's packages do not replace it.
+- `git` — version stamping and the UxPlay checkout.
+- Homebrew — only as the source of the C dependencies; `brew` must be on `PATH`.
+
+Confirm the Command Line Tools are **complete**, not merely present. This
+compiles a one-line translation unit that needs `<cstring>` from the SDK:
+
+```bash
+printf '#include <cstring>\nint main(void){return 0;}\n' | clang++ -E -x c++ - >/dev/null && echo "CLT ok"
+```
+
+A failure of the form `'cstring' file not found` (or any other standard C/C++
+header such as `iostream`, `vector`, `cstdint`) means the Command Line Tools
+payload is incomplete: the SDK that ships with the tools is missing headers it
+is supposed to contain. This page does not claim to know how a machine gets
+into that state — a half-finished or interrupted installation or update is one
+way, so is a payload damaged some other way. The diagnosis is the symptom
+("the tools are installed but the SDK is incomplete"), and the repair below
+treats that symptom.
+
+`xcode-select --install` will not repair it: it reports
+`Command line tools are already installed`. Remove the install and request it
+again:
+
+```bash
+sudo rm -rf /Library/Developer/CommandLineTools
+xcode-select --install
+```
+
+Know what that removal costs before you run it:
+
+- It deletes the **local Command Line Tools install only** — the SDK plus
+  `clang`, `swift`, `codesign` and the rest. A full Xcode.app in
+  `/Applications` is a separate install and is not touched.
+- The path **cannot be restored**; the only way back is the reinstall in the
+  second command. Until that finishes, the machine has no C/C++/Swift
+  toolchain, so no build of anything works.
+- `xcode-select --install` needs **network access** and an admin account (the
+  `sudo` above). Offline, the machine stays without a toolchain until it is.
+- If the reinstall reports the tools are already installed and still leaves the
+  payload broken, drop the stale receipt first and retry:
+  `sudo pkgutil --forget com.apple.pkg.CLTools_Executables`.
+
+Then re-run the check above before building. The build itself would fail at
+`uxplay.cpp:24: #include <cstring>`, which names the symptom rather than the
+cause.
+
 ## Development build
 
 ```bash
@@ -304,6 +357,28 @@ third-party list, with versions and licences, is `THIRD-PARTY-NOTICES.md`.
 
 ## Distribution status
 
-The archive is the only artifact the build produces. No `.dmg`, no Homebrew
-formula or cask, and no download page are published yet; the source repository
-is named in `README.md` and in the app's About window.
+The archive is the only artifact a release publishes: no `.dmg`, and no
+Homebrew formula or cask. MiragePlay 0.1.0 is released — `v0.1.0` at
+<https://github.com/miles0428/MiragePlay/releases/tag/v0.1.0> carries
+`mirageplay-0.1.0.zip`, built from the commit that tag points at.
+
+**On signing, precisely:** the app inside that archive is **ad-hoc signed**,
+which is not the same as being signed for distribution. It carries no
+Developer ID signature (`codesign -dv` reports `Signature=adhoc` and
+`TeamIdentifier=not set`, with no `Authority` line) and it is **not
+notarized** by Apple (`xcrun stapler validate` reports no ticket stapled).
+Ad-hoc signing keeps the bundle's own integrity intact and lets the closure
+dylibs load; it gives Gatekeeper nothing to trust. The consequence for anyone
+who downloads the archive: the first launch is blocked, and you get past it by
+right-clicking the app → **Open** → **Open**, or by allowing it in System
+Settings → Privacy & Security → **Open Anyway**. Expect the same on every new
+version.
+
+The same repository is the app's corresponding source, and the app's About
+window links to it.
+
+Because the bundle links UxPlay (GPL-3), every release carries corresponding
+source: the app from this repository at the release tag, and the receiver core
+from the UxPlay fork and commit recorded in `core/vendor.lock`. Both are public,
+so anyone holding the archive can rebuild exactly what it contains. See
+[Upstream licence obligations](#upstream-licence-obligations).
