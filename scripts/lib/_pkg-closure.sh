@@ -106,6 +106,125 @@ _pkg_gst_dir_has_lib() {
     return 1
 }
 
+# The library directory a macOS framework bundle really spells, for a recorded
+# path that uses the pkg-config spelling.
+#
+# A framework bundle is laid out as <Name>.framework/Libraries (a symlink to
+# Versions/<v>/lib), but the .pc files shipped by the "Official" GStreamer .pkg
+# say `libdir=${prefix}/lib`. The vendored configure step rewrites its own link
+# lines (renderers/CMakeLists.txt) yet CMakeCache.txt keeps the pkg-config
+# spelling verbatim, so on such a machine the record names <bundle>/lib — a
+# directory that has never existed there — while the libraries sit one alias
+# away under <bundle>/Libraries.
+#
+# The filesystem decides, never the string shape:
+#   - the recorded path must be ABSENT. An <bundle>/lib that exists but holds
+#     no libgstreamer is dependency drift inside an installed bundle (a
+#     framework upgraded in place), not a spelling, and must stay a hard error.
+#   - a component of it must end in `.framework` and the component immediately
+#     below that bundle must be exactly `lib`: that is the only spelling
+#     pkg-config produces.
+#   - <bundle>/Libraries must exist AND hold a libgstreamer-1.0 image, so the
+#     alias is granted by the same evidence every other candidate needs.
+#
+# Args:
+#     path (string): a recorded library directory.
+#
+# Echoes:
+#     the counterpart library directory, when the alias resolves.
+#
+# Returns:
+#     int: 0 when the path is a framework `lib` alias with the libraries under
+#          `Libraries`; 1 otherwise (including for every framework path whose
+#          counterpart is missing or empty — a framework-shaped string alone is
+#          never evidence that the libraries are there).
+_pkg_gst_framework_lib_root() {
+    local path="$1" bundle="" root=""
+    bundle="$(_pkg_gst_framework_bundle "$path")" || return 1
+    # A spelling only applies to a path that is not there. Whatever exists is
+    # judged on its contents by the caller.
+    if [ -d "$path" ]; then
+        return 1
+    fi
+    # A dangling alias into an uninstalled framework is dependency drift.
+    [ -d "$bundle" ] || return 1
+    root="$bundle/Libraries"
+    [ -d "$root" ] || return 1
+    _pkg_gst_dir_has_lib "$root" || return 1
+    printf '%s\n' "$root"
+}
+
+# One-line-per-directory account of what the framework alias was tried on, for
+# the zero-candidate error message: a log that only says "nothing exists" leaves
+# the reader unable to tell a missing alias from an alias that was never
+# considered.
+#
+# Args:
+#     cache (string): the core build record.
+#
+# Echoes:
+#     one line per distinct recorded directory: the resolved alias when it is
+#     usable, or the reason it was refused when the path is framework-shaped;
+#     a single "tried (...)" line when no recorded directory is spelled
+#     <bundle>.framework/lib at all.
+_pkg_gst_alias_report() {
+    local cache="$1" dir alt="" lines=""
+    while IFS= read -r dir; do
+        [ -n "$dir" ] || continue
+        alt="$(_pkg_gst_framework_lib_root "$dir")" || alt=""
+        if [ -n "$alt" ]; then
+            lines="${lines}gst-source:   framework alias  : $dir -> $alt (usable)"$'\n'
+            continue
+        fi
+        if _pkg_gst_framework_bundle "$dir" >/dev/null; then
+            lines="${lines}gst-source:   framework alias  : $dir -> refused (bundle absent, not a <bundle>/lib spelling, or Libraries without libgstreamer)"$'\n'
+        fi
+    done < <(_pkg_gst_record_libdirs "$cache" | awk 'NF && !seen[$0]++')
+    printf '%s' "${lines:-gst-source:   framework alias  : tried (no recorded dir is spelled <bundle>.framework/lib)}"
+}
+
+# The framework bundle a recorded library directory is spelled under, when the
+# spelling is pkg-config's `<bundle>/lib`.
+#
+# String shape only — existence and contents belong to the caller. `lib` must be
+# the component IMMEDIATELY below the bundle (that is the only spelling
+# pkg-config produces) and the bundle component must end at a '/' boundary, so
+# `foo.frameworkish/lib` never qualifies and `lib/gstreamer-1.0` (a real
+# directory: the plugin directory) is not a spelling.
+#
+# Args:
+#     path (string): a recorded library directory.
+#
+# Echoes:
+#     the bundle directory, when the path is spelled `<bundle>/lib`.
+#
+# Returns:
+#     int: 0 when the path has that shape, 1 otherwise.
+_pkg_gst_framework_bundle() {
+    local raw="$1" path="" parts=() part="" prefix="" bundle=""
+    # Collapse repeated slashes before parsing: the record — and any path that
+    # came through a TMPDIR with a trailing slash — can spell `/a//b`, and the
+    # component-by-component rebuild below would then not line up with the raw
+    # string. `tr -s` is a no-op for a path that is already spelled once.
+    path="$(printf '%s\n' "$raw" | tr -s '/')"
+    path="${path%/}"
+    case "$path" in
+        *.framework|*.framework/*) ;;
+        *) return 1 ;;
+    esac
+    IFS='/' read -r -a parts <<<"$path"
+    for part in ${parts[@]+"${parts[@]}"}; do
+        [ -n "$part" ] || continue
+        prefix="$prefix/$part"
+        case "$part" in
+            *.framework) bundle="$prefix" ;;
+        esac
+    done
+    [ -n "$bundle" ] || return 1
+    [ "${path#"$bundle"/}" = "lib" ] || return 1
+    printf '%s\n' "$bundle"
+}
+
 # What this shell's pkg-config answers, for error messages only.
 _pkg_gst_shell_libdir() {
     local dir
@@ -168,10 +287,18 @@ pkg_gst_core_cache() {
 # not know a GStreamer) and two or more distinct ones (the record is ambiguous)
 # are both hard errors: either way this shell cannot know which GStreamer the
 # helper was linked against, and picking one would be a guess that ships.
+#
+# One spelling is converted, never guessed: a recorded <bundle>.framework/lib
+# that does not exist is the alias of <bundle>.framework/Libraries when — and
+# only when — that directory exists and holds the libgstreamer image
+# (_pkg_gst_framework_lib_root). The conversion still goes through the same
+# evidence check as every other candidate, and the alias does not add a
+# candidate: it resolves the one the record named. Ambiguity and emptiness stay
+# hard errors.
 #   [cache file]
 pkg_gst_libdir() {
     local cache="${1:-$(pkg_gst_core_cache)}"
-    local dir real seen="" candidates="" count=0 chosen=""
+    local dir real resolved seen="" candidates="" count=0 chosen=""
 
     if [ ! -f "$cache" ]; then
         _pkg_gst_source_error \
@@ -182,24 +309,41 @@ pkg_gst_libdir() {
 
     while IFS= read -r dir; do
         [ -n "$dir" ] || continue
-        _pkg_gst_dir_has_lib "$dir" || continue
-        real="$(realpath "$dir")"
+        resolved="$dir"
+        if ! _pkg_gst_dir_has_lib "$resolved"; then
+            # A directory that exists without libgstreamer is drift, not a
+            # spelling; only an absent path may be a framework alias.
+            if [ -d "$dir" ]; then
+                continue
+            fi
+            resolved="$(_pkg_gst_framework_lib_root "$dir")" || continue
+        fi
+        real="$(realpath "$resolved")"
         case "$seen" in
             *"|$real|"*) continue ;;
         esac
         seen="$seen|$real|"
-        candidates="${candidates}gst-source:   candidate        : $dir -> $real"$'\n'
+        if [ "$resolved" = "$dir" ]; then
+            candidates="${candidates}gst-source:   candidate        : $dir -> $real"$'\n'
+        else
+            candidates="${candidates}gst-source:   candidate        : $dir -> $resolved (framework alias) -> $real"$'\n'
+        fi
         count=$((count + 1))
-        chosen="$dir"
+        chosen="$resolved"
     done < <(_pkg_gst_record_libdirs "$cache")
 
     if [ "$count" -eq 0 ]; then
+        # One line per distinct recorded directory (the record often spells the
+        # same directory twice, e.g. GST_LIBRARY_DIRS and GST_PREFIX), then one
+        # line per framework alias that was tried and refused: the log must show
+        # what was attempted, not repeat what was not.
         local raw=""
-        raw="$(_pkg_gst_record_libdirs "$cache" | tr '\n' ' ')"
+        raw="$(_pkg_gst_record_libdirs "$cache" | awk 'NF && !seen[$0]++' | tr '\n' ' ')"
         _pkg_gst_source_error \
             "the core build record names no GStreamer library directory that exists on disk" \
             "$cache" \
-            "gst-source:   recorded dirs    : ${raw:-(none)}"
+            "gst-source:   recorded dirs    : ${raw:-(none)}" \
+            "$(_pkg_gst_alias_report "$cache")"
         return 1
     fi
     if [ "$count" -gt 1 ]; then
@@ -281,10 +425,17 @@ pkg_gst_plugindir() {
 # it must come from the same installation as the libraries: a scanner from
 # another GStreamer writes a registry the shipped plugins cannot load.
 #
-# Only the core build record is searched, from the library directory upwards
-# (keg, framework version dir, framework root). The Homebrew prefix is never
-# used as a fallback — it is only named in the error so the divergence is
-# visible.
+# Only the core build record is searched, from the library directory upwards.
+# How many levels that takes is a property of each GStreamer's layout, so no
+# fixed count is assumed: a Homebrew keg keeps libexec/ at the keg, a framework
+# version dir at Versions/<v>/, a prefix install at the prefix — and a framework
+# whose Libraries alias resolves into Versions/<v>/lib needs the scan from the
+# version dir, not from the bundle. The walk therefore goes one ancestor at a
+# time up to (but excluding) the filesystem root, nearest ancestor first, and
+# every hit must still resolve inside the ancestor it was found under, so a
+# scanner can only come from a directory that contains these libraries.
+# The Homebrew prefix is never used as a fallback — it is only named in the
+# error so the divergence is visible.
 #   [cache file]
 pkg_gst_scanner() {
     local cache="${1:-$(pkg_gst_core_cache)}"
@@ -292,9 +443,8 @@ pkg_gst_scanner() {
 
     libdir="$(pkg_gst_libdir "$cache")" || return 1
     real="$(_pkg_gst_install_root "$libdir")" || real="$(realpath "$libdir")"
-    for root in "$real" \
-                "$(dirname "$real")" \
-                "$(dirname "$(dirname "$real")")"; do
+    root="$real"
+    while [ -n "$root" ] && [ "$root" != "/" ]; do
         roots="${roots}${roots:+ }$root"
         for cand in \
             "$root/libexec/gstreamer-1.0/gst-plugin-scanner" \
@@ -308,6 +458,7 @@ pkg_gst_scanner() {
                 return 0
             fi
         done
+        root="$(dirname "$root")"
     done
     _pkg_gst_source_error \
         "no gst-plugin-scanner in the GStreamer the core build record names (searched upwards from $real)" \

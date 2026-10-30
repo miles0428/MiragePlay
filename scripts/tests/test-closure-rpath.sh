@@ -23,6 +23,9 @@
 #   positive (last resort) @rpath/libgstreamer-1.0.dylib resolves through the
 #                        library directory the core build record names, when no
 #                        LC_RPATH of any image covers it
+#   positive (alias)     the same fallback when the record spells the pkg-config
+#                        lib/ of a framework bundle: it must follow the alias to
+#                        the real image, not to the nonexistent <bundle>/lib
 #   positive             @loader_path/<x> and @executable_path/<x> expand
 #   negative #1          LC_RPATH pointing at a directory that does not exist
 #                        -> still dangling, non-zero
@@ -219,6 +222,38 @@ if [ -n "$got" ] && [ "$(realpath "$got")" = "$(realpath "$LIB/libgstreamer-1.0.
     pass "resolved via the core build record's libdir: $got"
 else
     fail "@rpath resolution did not fall back to the core build record's libdir (got '${got:-nothing}')"
+fi
+
+section "@rpath/<leaf> resolves through a framework-aliased library directory"
+# The record spells the pkg-config lib/ of a framework bundle (the .pkg's .pc
+# files do), so the last-resort library directory is only reachable through the
+# lib -> Libraries alias. The rpath fallback must follow the real path: a
+# closure that resolved to the nonexistent <bundle>/lib would record a row that
+# cannot be copied.
+FW_BUNDLE="$WORK/fw/Z.framework"
+FW_VERSION="$FW_BUNDLE/Versions/A"
+mkdir -p "$FW_VERSION/lib"
+cp "$LIB/libgstreamer-1.0.dylib" "$FW_VERSION/lib/libgstreamer-1.0.dylib"
+ln -s "Versions/A/lib" "$FW_BUNDLE/Libraries"
+CACHE_FW="$WORK/CMakeCache-framework.txt"
+{
+    printf 'GST_LIBRARY_DIRS:INTERNAL=%s/lib\n' "$FW_BUNDLE"
+    printf 'GST_PREFIX:INTERNAL=%s\n' "$FW_BUNDLE"
+} >"$CACHE_FW"
+fw_libdir="$(PKG_CLOSURE_CORE_CACHE="$CACHE_FW" pkg_gst_libdir 2>/dev/null)"
+if [ -n "$fw_libdir" ] \
+    && [ "$(realpath "$fw_libdir" 2>/dev/null)" = "$(realpath "$FW_BUNDLE/Libraries")" ]; then
+    pass "the record's framework lib/ spelling resolved to Libraries ($fw_libdir)"
+else
+    fail "the record's framework lib/ spelling did not resolve (got '${fw_libdir:-nothing}')"
+fi
+got="$(_pkg_resolve_dep_reference '@rpath/libgstreamer-1.0.dylib' \
+        "$WORK/core/lastresort" "" "${fw_libdir:-/nonexistent}" 2>/dev/null)"
+if [ "$(realpath "${got:-/nonexistent}" 2>/dev/null)" \
+        = "$(realpath "$FW_VERSION/lib/libgstreamer-1.0.dylib")" ]; then
+    pass "the fallback followed the alias to the real image ($got)"
+else
+    fail "the fallback did not follow the alias (got '${got:-nothing}')"
 fi
 
 section "@loader_path/<x> and @executable_path/<x> expand"
