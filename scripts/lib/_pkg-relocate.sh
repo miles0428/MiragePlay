@@ -123,9 +123,14 @@ pkg_stage_closure() {
 #   $2  role  (bin|lib|plugin|scanner)
 #   $3  name map directory
 #   $4  relocation log (TSV: file, rule, old, new)
+#   $5  GStreamer library directory the closure came from (optional; @rpath
+#       dependencies are resolved against it as a last resort)
+#   $6  main executable of the bundle (optional; owner of @executable_path and
+#       of the last-resort LC_RPATH)
 pkg_relocate_file() {
     local file="$1" role="$2" mapdir="$3" log="$4"
-    local inc="$file.relocating" dep target_key canon new prefix rule id rc=0
+    local gstlibdir="${5:-}" core_binary="${6:-}"
+    local inc="$file.relocating" dep target_key canon new prefix rule id rc=0 src
 
     case "$role" in
         bin)     prefix='@loader_path/../Frameworks/' ;;
@@ -135,21 +140,40 @@ pkg_relocate_file() {
         *)       return 1 ;;
     esac
 
+    # The GStreamer directory behind an @rpath dependency is only needed when
+    # the file still carries one, so it is resolved lazily: on a Homebrew build
+    # there is none and this never runs.
     rm -f "$inc"
     cp "$file" "$inc" || return 1
     chmod "$(stat -f%Lp "$file")" "$inc" || return 1
 
     while IFS= read -r dep; do
         [ -n "$dep" ] || continue
-        # Already-relative load commands are left alone: relocating is not
-        # idempotent by nature, and a second pass over a relocated file must
-        # not try to resolve @loader_path against the build machine.
+        # Already-relative load commands that this file itself owns are left
+        # alone: relocating is not idempotent by nature, and a second pass over
+        # a relocated file must not try to resolve @loader_path against the
+        # build machine. @rpath / @executable_path are NOT in that category:
+        # the bundle design is "@loader_path everywhere" (R1-R9), so one of
+        # those left in place only resolves on the machine that built it.
         case "$dep" in
-            @loader_path/*|@rpath/*|@executable_path/*) continue ;;
+            @loader_path/*|@loader_path) continue ;;
         esac
         pkg_is_system_image "$dep" && continue
-        [ -e "$dep" ] || { echo "relocate: dangling $dep (in $file)" >&2; rc=1; continue; }
-        target_key="$(_pkg_key "$(realpath "$dep")")"
+        src="$dep"
+        case "$dep" in
+            @rpath/*|@rpath|@executable_path/*|@executable_path)
+                if [ -z "$gstlibdir" ]; then
+                    gstlibdir="$(pkg_gst_libdir 2>/dev/null)" || gstlibdir=""
+                fi
+                src="$(_pkg_resolve_dep_reference "$dep" "$file" "$core_binary" "$gstlibdir")" || {
+                    echo "relocate: cannot resolve $dep (in $file)" >&2
+                    rc=1
+                    continue
+                }
+                ;;
+        esac
+        [ -e "$src" ] || { echo "relocate: dangling $dep (in $file)" >&2; rc=1; continue; }
+        target_key="$(_pkg_key "$(realpath "$src")")"
         canon=""
         [ -f "$mapdir/$target_key" ] && canon="$(cat "$mapdir/$target_key")"
         if [ -z "$canon" ]; then
@@ -206,11 +230,14 @@ pkg_relocate_file() {
 #   $3  log file (TSV of applied rewrites)
 pkg_relocate_bundle() {
     local tsv="$1" contents="$2" log="$3"
-    local scratch rc=0 f
+    local scratch rc=0 f gstlibdir core
 
     scratch="$(mktemp -d "${TMPDIR:-/tmp}/pkg-relocate.XXXXXX")" || return 1
     pkg_build_name_map "$tsv" "$scratch/names" || { rm -rf "$scratch"; return 1; }
     : >"$log"
+
+    gstlibdir="$(pkg_gst_libdir 2>/dev/null)" || gstlibdir=""
+    core="$contents/MacOS/uxplay"
 
     # Order mirrors P-11.4: libraries first, then plugins, then scanner, then
     # the helper executable (the helper is the only one that references all of
@@ -218,19 +245,47 @@ pkg_relocate_bundle() {
     for f in "$contents"/Frameworks/*.dylib; do
         [ -f "$f" ] || continue
         [ -L "$f" ] && continue
-        pkg_relocate_file "$f" lib "$scratch/names" "$log" || rc=1
+        pkg_relocate_file "$f" lib "$scratch/names" "$log" "$gstlibdir" "$core" || rc=1
     done
     for f in "$contents"/plugins/*.dylib; do
         [ -f "$f" ] || continue
-        pkg_relocate_file "$f" plugin "$scratch/names" "$log" || rc=1
+        pkg_relocate_file "$f" plugin "$scratch/names" "$log" "$gstlibdir" "$core" || rc=1
     done
     if [ -f "$contents/bin/gst-plugin-scanner" ]; then
-        pkg_relocate_file "$contents/bin/gst-plugin-scanner" scanner "$scratch/names" "$log" || rc=1
+        pkg_relocate_file "$contents/bin/gst-plugin-scanner" scanner "$scratch/names" "$log" \
+            "$gstlibdir" "$core" || rc=1
     fi
-    pkg_relocate_file "$contents/MacOS/uxplay" bin "$scratch/names" "$log" || rc=1
+    pkg_relocate_file "$core" bin "$scratch/names" "$log" "$gstlibdir" "$core" || rc=1
 
     rm -rf "$scratch"
     return "$rc"
+}
+
+# Assert that no Mach-O of the helper bundle still carries a dyld-relative load
+# path that only exists on the build machine (P-7.2 point 4, second half).
+#
+# The first half (pkg_assert_no_homebrew) greps for "/opt/homebrew/", so it is
+# blind to exactly the paths that break a bundle shipped from a machine with
+# GStreamer.framework installed: @rpath/<name> and @executable_path/<name>.
+# Those resolve only against the build machine's LC_RPATH/search path, so a
+# bundle can pass every other check and still die at dyld on the recipient's
+# Mac. The bundle design is "@loader_path everywhere" (R1-R9); anything else in
+# a load command is a defect. Prints one line per offending file; returns 1 if
+# any.
+#   $1  helper bundle Contents directory
+pkg_assert_no_rpath_deps() {
+    local contents="$1" f deps bad=0
+    for f in "$contents"/Frameworks/*.dylib "$contents"/plugins/*.dylib \
+             "$contents/bin/gst-plugin-scanner" "$contents/MacOS/uxplay"; do
+        [ -f "$f" ] || continue
+        [ -L "$f" ] && continue
+        deps="$(pkg_dylib_deps "$f" | grep -E '^@(rpath|executable_path)(/|$)' || true)"
+        if [ -n "$deps" ]; then
+            printf 'UNRESOLVED_DYLD_LOAD_PATH %s\n%s\n' "${f##*/}" "$deps"
+            bad=1
+        fi
+    done
+    return "$bad"
 }
 
 # Assert that every rewritten install name resolves to a file that actually

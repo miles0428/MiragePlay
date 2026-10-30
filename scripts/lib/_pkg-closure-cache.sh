@@ -93,15 +93,30 @@ pkg_closure_cache_root() {   # [build root]
 # graph are caught by pkg_closure_manifest_live on a hit.
 pkg_closure_fingerprint() {   # <closure.tsv> <uxplay> <scanner>
     local tsv="$1" uxplay="$2" scanner="$3"
-    local libdir plugindir names plugin tools
+    local libdir plugindir names plugin tools core_cache cache_copy
 
+    # Every GStreamer field here comes from the core build record (the one the
+    # helper was linked against), never from this shell's pkg-config: a different
+    # answer from the shell must not look like "the same closure".
+    core_cache="$(pkg_gst_core_cache)"
+    cache_copy="$(mktemp "${TMPDIR:-/tmp}/gst-core-cache.XXXXXX")" || cache_copy=""
+    [ -n "$cache_copy" ] || cache_copy=/dev/null
     libdir="$(pkg_gst_libdir 2>/dev/null)" || libdir="unknown"
     plugindir="$(pkg_gst_plugindir 2>/dev/null)" || plugindir="unknown"
 
-    printf 'schema=2\n'
+    printf 'schema=3\n'
     printf 'brew=%s\n' "$(pkg_brew_prefix 2>/dev/null || echo unknown)"
-    printf 'gst_version=%s\n' \
-        "$(pkg-config --modversion gstreamer-1.0 2>/dev/null || echo unknown)"
+    printf 'core_cache=%s\n' "$core_cache"
+    if [ -f "$core_cache" ]; then
+        # Only the GStreamer lines: an unrelated reconfigure must not invalidate
+        # the closure cache, a different GStreamer must.
+        grep -E '^GST[0-9]*_' "$core_cache" >"$cache_copy" 2>/dev/null || true
+        printf 'core_gst_sha256=%s\n' "$(shasum -a 256 "$cache_copy" 2>/dev/null | cut -d' ' -f1)"
+    else
+        printf 'core_gst_sha256=missing\n'
+    fi
+    [ "$cache_copy" = /dev/null ] || rm -f "$cache_copy"
+    printf 'gst_version=%s\n' "$(pkg_gst_version 2>/dev/null || echo unknown)"
     printf 'gst_libdir=%s\n' "$libdir"
     printf 'gst_plugindir=%s\n' "$plugindir"
     printf 'uxplay_sha256=%s\n' "$(shasum -a 256 "$uxplay" 2>/dev/null | cut -d' ' -f1)"
@@ -351,13 +366,19 @@ pkg_closure_install() {   # <contents> <entry> <tsv> <uxplay> <reloc log> [sign]
     pkg_build_name_map "$tsv" "$map" || { rm -rf "$map"; return 1; }
     : >"$log"
     [ -s "$entry/relocations.tsv" ] && cat "$entry/relocations.tsv" >>"$log"
-    pkg_relocate_file "$uxplay" bin "$map" "$log" || { rm -rf "$map"; return 1; }
+    pkg_relocate_file "$uxplay" bin "$map" "$log" "$(pkg_gst_libdir 2>/dev/null)" "$uxplay" \
+        || { rm -rf "$map"; return 1; }
     rm -rf "$map"
 
     # Self-check before anyone signs or ships this: no load path back into
-    # Homebrew, and every rewritten install name resolvable inside the bundle.
+    # Homebrew, no dyld-relative load path that only exists on this machine, and
+    # every rewritten install name resolvable inside the bundle.
     if ! pkg_assert_no_homebrew "$contents"; then
         echo "closure-cache: the installed closure still points at Homebrew" >&2
+        return 1
+    fi
+    if ! pkg_assert_no_rpath_deps "$contents"; then
+        echo "closure-cache: the installed closure still carries an @rpath/@executable_path load path" >&2
         return 1
     fi
     if ! pkg_assert_ids_resolvable "$contents"; then

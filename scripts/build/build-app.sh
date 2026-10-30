@@ -600,9 +600,17 @@ if [ "$CLOSURE_MODE" = "on" ] \
     rm -rf "$CLOSURE_WORK"
     mkdir -p "$CLOSURE_WORK"
 
+    # Which GStreamer to ship is decided by the core's own configure record, not
+    # by this shell's pkg-config: the vendored CMakeLists prefers an installed
+    # GStreamer.framework, and following the shell there produced a bundle whose
+    # libraries came from Homebrew while the helper had been linked against the
+    # framework.
+    export PKG_CLOSURE_CORE_CACHE="$(dirname "$CORE_UXPLAY")/CMakeCache.txt"
+
     GST_SCANNER="$(pkg_gst_scanner)" || {
         echo "ERROR: cannot resolve gst-plugin-scanner — is GStreamer installed?" >&2
-        echo "       (brew install gstreamer; the closure cannot be built without it)" >&2
+        echo "       (the scanner must come from the GStreamer the core was linked against;" >&2
+        echo "        see the gst-source: lines above)" >&2
         exit 1
     }
     pkg_compute_closure "$CLOSURE_WORK" "$CORE_UXPLAY" "$GST_SCANNER" || {

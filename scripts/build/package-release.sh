@@ -316,11 +316,16 @@ GST_SCANNER=""
 
 compute_closure() {
     local scanner
-    scanner="$(pkg_gst_scanner)" || die "cannot resolve gst-plugin-scanner (is gstreamer installed?)"
+    # The closure ships the GStreamer the helper was linked against: that is
+    # what the core's configure record says, and this shell's pkg-config is not
+    # consulted (the vendored CMakeLists prefers GStreamer.framework, so the two
+    # can name different installations on the same machine).
+    export PKG_CLOSURE_CORE_CACHE="$(dirname "$CORE_UXPLAY")/CMakeCache.txt"
+    scanner="$(pkg_gst_scanner)" || die "cannot resolve gst-plugin-scanner for the GStreamer the core was linked against (see the gst-source: lines)"
     [ -x "$CORE_UXPLAY" ] || die "no core helper binary at $CORE_UXPLAY (run scripts/build/build-core.sh --embedded)"
     GST_SCANNER="$scanner"
 
-    echo "=== [step 3.5] computing the shipping closure from the Homebrew Cellar ==="
+    echo "=== [step 3.5] computing the shipping closure from the core build record ==="
     pkg_compute_closure "$WORK/closure" "$CORE_UXPLAY" "$scanner" || die "closure computation failed"
     cp "$WORK/closure/closure.tsv" "$CLOSURE_TSV"
     log "closure: $(pkg_closure_summary "$CLOSURE_TSV")"
@@ -375,10 +380,12 @@ stage_closure() {
         log "- ✅ relocation applied: $(wc -l <"$RELOC_LOG" | tr -d ' ') rewrites ($(reloc_counts "$RELOC_LOG"))"
     fi
 
-    echo "=== [step 3.5 self-check] the bundle never points back at Homebrew ==="
-    local hb unresolved
+    echo "=== [step 3.5 self-check] the bundle never points back at Homebrew or at a build-machine rpath ==="
+    local hb unresolved rpdeps
     hb="$(pkg_assert_no_homebrew "$CONTENTS" | tee -a "$EVIDENCE" | wc -l | tr -d ' ')"
     ck "no /opt/homebrew load path in any bundled Mach-O" "0" "$hb"
+    rpdeps="$(pkg_assert_no_rpath_deps "$CONTENTS" | tee -a "$EVIDENCE" | wc -l | tr -d ' ')"
+    ck "no @rpath/@executable_path load path in any bundled Mach-O" "0" "$rpdeps"
     unresolved="$(pkg_assert_ids_resolvable "$CONTENTS" | tee -a "$EVIDENCE" | wc -l | tr -d ' ')"
     ck "every rewritten install name resolves inside the bundle" "0" "$unresolved"
 }
@@ -665,8 +672,9 @@ write_report() { # write_report <path>
         echo "- git tag at HEAD: \`${TAG:-<none>}\`"
         echo "- version source: $([ -n "$TAG" ] && echo "git tag \`$TAG\`" || echo "**UNTAGGED dev placeholder — NOT RELEASABLE**")"
         echo "- CFBundleShortVersionString \`$ver_short\`, CFBundleVersion \`$ver_build\` (app and helper share both)"
-        echo "- Homebrew prefix used for the closure: \`$(pkg_brew_prefix)\`"
-        echo "- GStreamer libdir: \`$(pkg_gst_libdir)\`"
+        echo "- GStreamer (from the core build record): version \`$(pkg_gst_version 2>/dev/null || echo unknown)\`, libdir \`$(pkg_gst_libdir 2>/dev/null || echo unknown)\`"
+        echo "- shell pkg-config for gstreamer-1.0 (informational, not the closure source): \`$(pkg-config --variable=libdir gstreamer-1.0 2>/dev/null || echo none)\`"
+        echo "- Homebrew prefix on the build machine: \`$(pkg_brew_prefix)\`"
         if [ -z "$TAG" ]; then
             echo
             echo "> ## ⛔ no tag, release forbidden"
